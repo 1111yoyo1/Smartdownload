@@ -1,10 +1,10 @@
 # import re,os,shutil,sys,time,xlrd
-import ssdt_python,sys,os,time,glob
-sys.path.append('/home/yoxu/sc/')
+import ssdt_python,sys,os,time,glob,shlex,subprocess
+sys.path.append('/home/yoxu/sc/lib')
 
 from lib import *
 from optparse import OptionParser
-
+import socket
 
 def __ProcessCommandLine():
     parser = OptionParser()
@@ -14,7 +14,7 @@ def __ProcessCommandLine():
     parser.add_option("--bn", "--buildno", dest="buildno",
                   help="Fill in build number")
 
-    parser.add_option("--s", "--serial", dest="serial",
+    parser.add_option("--s", "--serial", dest="serial",default=None,
                   help="Fill in serial number")
     parser.add_option("--c", "--config", dest="config",
                   help="Fill in config")
@@ -34,7 +34,7 @@ def __ProcessCommandLine():
     parser.add_option("--wp", dest="wp",default=2,type=int,
                   help="Enable the wp option of this config 0. disable 1. enable 2.* None")
     parser.add_option("--l", dest="lifeinseconds",default=0,type=int,
-                  help="Enable lifeinseconds option of this drive 31536000*. 31536000 1. customized by input ")
+                  help="Enable lifeinseconds option of this drive 0*. 0 1. customized by input ")
     parser.add_option("--d", dest="double",default=0,type=int,
                   help="Enable double size, 0.* default disable 1. customized capacity by input, 200 or 400 ")
     parser.add_option("--m", dest="misc_enable",default=2,type=int,
@@ -53,25 +53,18 @@ def getconfig(string):
             return configid
 
 def cdu(configid):
-    cdupath=glob.glob('/home/yoxu/SF_Genesis/*'+configid+'.bin')
-
+    path = '/mnt/ssdt/scratch/'
+    full_path_cdu = path+''+str(configid)+'.bin'
+    cdupath=glob.glob(full_path_cdu)
+    returncode = 0
     if cdupath == []:
         print "no found cdu,skip"
     else:
-        import SATA.Diagnostics
-        import SATA.Device
-        import SATA.ConfigDriveUniqueData
-        import Utilities.Log
-
-        device = SATA.Device.Device.FindSandForceDevice()
-        if device is not None:
-            SATA.Diagnostics.UnlockCustomerFirstAttemptSuccess(device)
-            cduClass = SATA.ConfigDriveUniqueData.ConfigDriveUniqueData(device)
-            #log = Utilities.Log.StartLog(device,None)
-            log = Utilities.Log.StartLog(device, None, messageFormatString=None,useXmlFormatting=False,showHeaderTrailer=False, showSsdInfo=False)
-        cduClass.UpdateFromFile(str(cdupath[0]), log)
-        if device is not None:
-            ssdt_python.UnSelectHBA(0)
+        cdu = 'ConfigDriveUnique.py --cduimagefilename='+full_path_cdu+''
+        print cdu
+        #os.system(cdu)
+        returncode = execute_command(cdu)
+    return returncode
 
 
 def cdu_serialnumber(serialNumber):
@@ -184,28 +177,14 @@ def cdu_miscfeature(misc_enable):
     if device is not None:
         ssdt_python.UnSelectHBA(0)
 
-def cdu_serial_serialoutput(delay, options, configid, serialNumber):
-    if configid is not None:
-        real_config = configid
-    else:
-        real_config = options.config
-        time.sleep(delay)
-
-    if real_config is not None and options.cduenable == 2:
-        cdu(real_config)
-        # if cdu(real_config):
-        #     Powercycle(delay)
-    #cdu_command = 'ConfigDriveUnique.py '
-    if getconfig(real_config) is not None:
-        serialNumber=configIDtoSerialnumber(getconfig(real_config), options.endnumber)
-
+def cdu_serial_serialoutput(delay, options, serialNumber):
     if serialNumber is not None:
         cdu_serialnumber(serialNumber)
 
     if options.double != 0:
         cdu_dlc(2)
 
-    #cdu_miscfeature(options.misc_enable)
+    cdu_miscfeature(options.misc_enable)
     cdu_serialoutput(options.serialouput)
     #     cdu_command += ' --serialnumber='+serialNumber+' --serialoutputcontrol='+str(options.serialouput) +''
     # else:
@@ -233,6 +212,30 @@ def Powercycle(delay):
     os.system('PowerOn.py')
     time.sleep(delay)
 
+def getserial():
+    cmd = 'hostname --s'
+    hostname = socket.gethostname().split('.')[0]
+    if stations[hostname] == 'NA':
+        return None
+    else:
+        return stations[hostname]
+
+def execute_command(cmdstring, cwd=None, timeout=None, shell=False):
+    if shell:
+        cmdstring_list = cmdstring
+    else:
+        cmdstring_list = shlex.split(cmdstring)
+    if timeout:
+        end_time = datetime.datetime.now() + datetime.timedelta(seconds=timeout)
+    sub = subprocess.Popen(cmdstring_list, cwd=cwd, stdin=subprocess.PIPE,shell=shell,bufsize=4096)
+    while sub.poll() is None:
+        time.sleep(0.1)
+        if timeout:
+            if end_time <= datetime.datetime.now():
+                raise Exception(" time out")
+    print str(sub.returncode)
+    return str(sub.returncode)
+
 if __name__ == "__main__":
 
     options = __ProcessCommandLine()
@@ -240,14 +243,15 @@ if __name__ == "__main__":
     build_location = os.environ.get("SSDT_FIRMWARE_ROOT", None)
     full_dir_build_location = build_location+'/builds/'
 
-    flag_build=False
-
     build=None
     smart_download_command=None
     serialNumber=None
-    configid=None
     delay=15
+    returncode = 0
 
+    if options.fd == 'y':
+        #pass
+        os.system("ForceDownLoad.py --u=0 --p=0 --force")
     if options.buildlabel is not None : #convert build label to build no
         print "Convert build label to build no"
 
@@ -257,100 +261,49 @@ if __name__ == "__main__":
         build=options.buildno
 
     if build is not None:
-        print "get build %s" %build 
-
-        configid = options.config
-
-        if build is not None and configid is not None: # have config and build no
-            serialNumber=configIDtoSerialnumber(configid, options.endnumber)
-
-            if serialNumber is not None: # found serialnumber
-                smart_download_command='SmartDownload.py --fd='+options.fd+' --build='+build+\
-                ' --serialnumber='+serialNumber+''
-
-            else: 
-                try:                       # only have config, found master table to get op and raise
-
-                    buildpath=glob.glob(full_dir_build_location+'*'+build+'')
-                    master_table=buildpath[0]+'/'+'cfg_customer/db/PPRO_tbl_master_config.csv'
-                    op_option=op_return(master_table, configid)
-                    raise_option=raise_return(master_table,configid)
-
-                    smart_download_command='SmartDownload.py --fd='+ options.fd +' --build='+ build +\
-                    ' --config='+ configid +' --logicalcapacity='+ op_option +' --disableuserraise='\
-                    +raise_option+'' 
-
-                except:                     # only have config, no found master table or op and raise
-                    print "no found master table use configID to download, may be not accurate"
-
-                    smart_download_command='SmartDownload.py --fd='+options.fd+' --build='+build+\
-                    ' --config='+configid+''
-
-        elif build is not None and options.serial is not None:
-            serialNumber=options.serial
-            smart_download_command='SmartDownload.py --fd='+options.fd+' --build='+build+\
-                ' --serialnumber='+serialNumber+''
-
-        elif len(sys.argv) == 1:
-            import SATA.Diagnostics
-            import SATA.Device
-
-            print "doing self download"
-            device = SATA.Device.Device.FindSandForceDevice()
-
-            try:
-                build = str(SATA.Diagnostics.GetDriveBuildLabel(device))
-
-            except:
-                raise Exception(" no found build id, can't self download")
-
-            import SATA.IdentifyDeviceData
-
-            identifyDeviceData = SATA.IdentifyDeviceData.IdentifyDeviceData( device )
-            serialNumber = str(identifyDeviceData.serialNumber.strip())
-
-            if serialNumber != '1':
-                smart_download_command='SmartDownload.py --build='+build+\
-                ' --serialnumber='+serialNumber+''
-            else:
-                import TestFramework.LogData
-
-                print "device serial number is 1, use config to get serial number"
-                configidCls = TestFramework.LogData.SsdInfoData(device)
-                configid = str(configidCls.getConfigIdFromDevice(device))
-
-                if configid is not None:
-                    smart_download_command='SmartDownload.py --build='+build+\
-                ' --configid='+configid+''
-                else:
-                    raise Exception(" no found valid serialnumber and valid configID abort self download")
-
-
-            wp=str(SerialnumberTowriteProtectCircuit(serialNumber))
-
-            if device is not None:
-                ssdt_python.UnSelectHBA(0) 
-
-        if smart_download_command is not None:
-            if options.wp != 2:
-                smart_download_command=smart_download_command+' --writeprotectcircuit='+str(options.wp)+''
-            if options.lifeinseconds != 0:
-                smart_download_command=smart_download_command+' --lifeinseconds='+str(options.lifeinseconds)+''
-            if options.double != 0:
-                smart_download_command=smart_download_command+' --supportdlc=1 --setdoublesize='+str(options.double)+''
-            else:
-                pass
-                #smart_download_command=smart_download_command+' --lifeinseconds=0'
+        print "get build %s" %build
+        if options.serial is not None:
+            serialNumber = options.serial
         else:
-            raise Exception(" can't get smart download command")
+            serialNumber = getserial()
+        if serialNumber is not None:
+            smart_download_command='SmartDownload.py --fd='+options.fd+' --build='+build+\
+            ' --serialnumber='+serialNumber+' --setserialnumber='+serialNumber+''
+            configid = SerialnumberToConfigID(serialNumber)
+            if str(configid) in ["33185","33134"]:
+                topfile_location = '/mnt/ssdt/scratch/topfile/'+str(configid)+'.txt'
+                smart_download_command = smart_download_command +' --topofile='+topfile_location+''
+        else:
+            raise Exception("can't get serial number, need to input")
 
-        print smart_download_command
-        os.system(smart_download_command)
-        
-        #cdu_serial_serialoutput(delay, options, configid, serialNumber)
-
+    if smart_download_command is not None:
+        if serialNumber in ['602006157001'] :
+            smart_download_command = smart_download_command+' --writeprotectcircuit=0'
+        elif options.wp != 2 :
+            smart_download_command = smart_download_command+' --writeprotectcircuit='+str(options.wp)+''
+        if options.lifeinseconds != 0:
+            smart_download_command = smart_download_command+' --lifeinseconds='+str(options.lifeinseconds)+''
+        if options.double != 0:
+            smart_download_command = smart_download_command+' --supportdlc=1 --setdoublesize='+str(options.double)+''
     else:
-        pass
-    cdu_serial_serialoutput(delay, options, configid, serialNumber)
+        raise Exception(" can't get smart download command")
 
+    print smart_download_command
+    time.sleep(delay)
+    #os.system(smart_download_command)
+    returncode += int(execute_command(smart_download_command))
 
+    time.sleep(delay)
+    # try:
+    returncode += int(cdu(configid))
+    # except:
+    #     raise Exception(" error occured during download cdu image")
+    cdu = 'ConfigDriveUnique.py --serialoutputcontrol=2 --misccustomerfeatures=2'
+
+    if options.double != 0:
+        cdu += ' --dlccontrol=2 --ncqtrimcontrol=2 ' 
+    time.sleep(delay)
+    #os.system(cdu)
+    returncode += int(execute_command(cdu))
+    # print returncode
+    #return returncode
